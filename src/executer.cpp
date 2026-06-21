@@ -1,29 +1,70 @@
 #include "executer.hpp"
 
+#include <fcntl.h>
 #include <sys/wait.h>
 #include <unistd.h>
 
+#include <cerrno>
 #include <iostream>
+#include <vector>
 
 #include "builtins.hpp"
 
 void Executer::execute(const std::vector<std::string>& tokens) {
-  if (Builtins::handle(tokens)) {
+  if (tokens.empty()) {
     return;
   }
 
-  std::vector<const char*> argv;
+  std::vector<std::string> args = tokens;
 
-  for (const std::string& token : tokens) {
-    argv.push_back(token.c_str());
+  bool background = false;
+
+  if (!args.empty() && args.back() == "&") {
+    background = true;
+    args.pop_back();
   }
-  argv.push_back(nullptr);
+
+  if (Builtins::handle(args)) {
+    return;
+  }
 
   pid_t pid = fork();
 
-  if (pid < 0) {  // fork failed
-    std::cerr << tokens[0] << ": failed to execute command" << std::endl;
-  } else if (pid == 0) {  // child process
+  if (pid < 0) {
+    std::cerr << args[0] << ": failed to execute command" << std::endl;
+  } else if (pid == 0) {
+    for (size_t i = 0; i < args.size(); i++) {
+      if (args[i] == ">") {
+        if (i + 1 >= args.size()) {
+          std::cerr << "missing output file" << std::endl;
+          _exit(1);
+        }
+
+        int file_fd = open(args[i + 1].c_str(),
+                           O_WRONLY | O_CREAT | O_TRUNC,
+                           0644);
+
+        if (file_fd < 0) {
+          perror("open");
+          _exit(1);
+        }
+
+        dup2(file_fd, STDOUT_FILENO);
+        close(file_fd);
+
+        args.erase(args.begin() + i, args.begin() + i + 2);
+        break;
+      }
+    }
+
+    std::vector<const char*> argv;
+
+    for (const std::string& arg : args) {
+      argv.push_back(arg.c_str());
+    }
+
+    argv.push_back(nullptr);
+
     int status = execvp(argv[0], const_cast<char* const*>(argv.data()));
 
     if (status != 0) {
@@ -33,9 +74,13 @@ void Executer::execute(const std::vector<std::string>& tokens) {
         msg = "command not found";
       }
 
-      std::cerr << tokens[0] << ": " << msg << std::endl;
+      std::cerr << args[0] << ": " << msg << std::endl;
     }
-  } else {  // parent process (pid > 0)
-    waitpid(pid, nullptr, 0);
+
+    _exit(1);
+  } else {
+    if (!background) {
+      waitpid(pid, nullptr, 0);
+    }
   }
 }
